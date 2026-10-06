@@ -28,6 +28,8 @@ Do not turn a question or audit into implementation without a request to change 
   contain unfinished work; describe failures and omissions honestly.
 - Commit only changes this session made; the `gene` skill has the steps. Exclude
   ambiguous changes and report them. Never sweep the shared index into a commit.
+  If another session's edits land in a commit anyway, note it and move on; don't
+  rewrite the commit to untangle them.
 - Never discard another writer's changes. Avoid working-tree reset, restore, stash,
   clean, and checkout operations in a shared tree. Undo your own changes with edits.
 - Parallel research and work on disjoint files are welcome. Serialize overlapping
