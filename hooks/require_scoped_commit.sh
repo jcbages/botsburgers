@@ -5,7 +5,7 @@
 # `git add` there is a read-modify-write race with a commit as the payload — one
 # agent stages, another commits, and the second one's history carries the first
 # one's half-finished work. Naming the paths, or building the commit in a private
-# index (`GIT_INDEX_FILE` + `commit-tree`, see /gene step 3), avoids that. This
+# index (`GIT_INDEX_FILE` + `commit-tree`, see /gene step 2), avoids that. This
 # advises and lets the commit through; a mixed commit is sorted out later, on a
 # branch that always converges. Wired globally by install.sh.
 #

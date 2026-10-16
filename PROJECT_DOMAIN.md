@@ -33,6 +33,7 @@ to that directory, including `../_shared/`.
   start by `hooks/session_start_persona_pick.sh` or named by the user.
 - `gene`: scoped local commit; push only on explicit request; truthful ticket state.
   Bundles the ledger tools in `skills/gene/scripts/` so they work from any project.
+- `linda`: scoped Linear tickets on explicit request.
 - `mr-frond`: package a recorded session delta into a PR.
 - `teddy`: address actionable PR feedback and conflicts, stopping for external reviews.
 - `mr-fischoeder`: scoped review with concrete failure evidence.

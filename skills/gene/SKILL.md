@@ -18,7 +18,7 @@ The scripts below live in this skill's `scripts/` directory; run them by that fu
 4. **Leave out what you cannot attribute.** A file another session also edited, or a contested ledger entry, stays uncommitted and goes in the report. Never discard or rewrite someone else's changes.
 5. **Push only on request.** First list `git log origin/main..HEAD`: pushing `main` publishes every unpushed commit, not just this session's. Never force-push `main`.
 
-Committing is best effort; don't overthink it. If a commit picks up another session's hunks anyway, mention it in the report and move on: do not amend, rewrite, or rebuild the commit to split them out.
+Committing is best effort. If a commit picks up another session's hunks anyway, mention it in the report and move on: do not amend, rewrite, or rebuild the commit to split them out.
 
 Write one cohesive commit with an imperative message. A best-effort commit may include unfinished work if the message and report say so. Reuse the session's test and review results; rerun checks only when something changed since. If Linear is opted in, update an identified ticket and mark it Done only when its acceptance criteria are met.
 

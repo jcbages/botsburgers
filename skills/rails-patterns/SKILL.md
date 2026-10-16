@@ -8,9 +8,9 @@ metadata:
 
 # Rails patterns
 
-Prefer the project's established architecture. These Basecamp-inspired defaults guide judgment; they do not require rewriting existing patterns or optimizing for line counts.
+Prefer the project's established architecture. These Basecamp-inspired defaults guide judgment; they do not require rewriting existing patterns.
 
-Keep controllers focused on HTTP coordination and put domain behavior with the relevant models or focused Ruby objects. Extract a concern when it expresses a coherent reusable capability, not to meet a method quota. Jobs own scheduling/retry concerns and can delegate reusable domain behavior; they do not need a one-line `perform`.
+Keep controllers focused on HTTP coordination and put domain behavior with the relevant models or focused Ruby objects. Extract a concern when it expresses a coherent reusable capability. Jobs own scheduling/retry concerns and can delegate reusable domain behavior.
 
 Use named scopes for meaningful reusable queries. A straightforward controller query is acceptable when it does not hide authorization or domain policy. Use transactions for changes that must succeed atomically, and design external side effects separately because database rollback cannot undo them.
 

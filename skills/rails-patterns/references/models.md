@@ -2,7 +2,7 @@
 
 Put persistence-related invariants and cohesive domain actions on the relevant model. Use focused plain Ruby objects when behavior spans domains or has an independent lifecycle. Avoid extracting a class or concern just to shorten another file.
 
-Concerns should name a capability and make their associations/callbacks visible. A model-specific concern can live under `app/models/<model_name>/`; follow the project's layout. There is no minimum method count or mandatory declaration order.
+Concerns should name a capability and make their associations/callbacks visible. A model-specific concern can live under `app/models/<model_name>/`; follow the project's layout.
 
 Use scopes for meaningful reusable predicates and association extensions when the operation naturally belongs to an association. Keep authorization scopes distinct from optional filters: an absent search filter may legitimately leave an already-authorized relation unchanged, while a missing tenant must not broaden access.
 

@@ -15,4 +15,4 @@ Research only the context needed to describe the problem accurately. Use an exis
 
 Write a short imperative title and concise description of the problem, expected outcome, relevant constraints, and useful source locations. Do not dictate a detailed implementation unless the user requests one. Add concrete acceptance criteria when completion is otherwise ambiguous.
 
-Split by independently deliverable outcomes or distinct risks, not a file-count quota. Use Linear relation links for genuine dependencies. Reuse a matching existing ticket when appropriate, and report the created or updated ticket links.
+Split by independently deliverable outcomes or distinct risks. Use Linear relation links for genuine dependencies. Reuse a matching existing ticket when appropriate, and report the created or updated ticket links.

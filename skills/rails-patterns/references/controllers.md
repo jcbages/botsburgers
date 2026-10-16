@@ -1,6 +1,6 @@
 # Controllers and authorization
 
-Controllers coordinate HTTP inputs, authorized records, domain operations, and responses. Keep them easy to read; there is no action line-count quota. A direct query can be clearer than a one-use scope, provided authorization and domain rules remain explicit.
+Controllers coordinate HTTP inputs, authorized records, domain operations, and responses. Keep them easy to read. A direct query can be clearer than a one-use scope, provided authorization and domain rules remain explicit.
 
 For a tenant-owned resource, load through the authorized relation:
 

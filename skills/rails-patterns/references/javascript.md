@@ -2,7 +2,7 @@
 
 Use the project's existing frontend stack. Do not add Alpine or migrate to Stimulus merely to follow this reference.
 
-Stimulus controllers coordinate DOM behavior through targets, values, classes, and actions. Keep local UI behavior local; extract plain JavaScript functions or classes when complex or reusable behavior benefits from independent reasoning and testing. A new class is not required for each controller method.
+Stimulus controllers coordinate DOM behavior through targets, values, classes, and actions. Keep local UI behavior local; extract plain JavaScript functions or classes when complex or reusable behavior benefits from independent reasoning and testing.
 
 Use private fields for internal state when appropriate, keeping methods invoked by Stimulus actions accessible. Prefer outlets for explicit controller relationships and dispatched events for loose coupling or integration with non-Stimulus consumers. Neither mechanism is universally preferred.
 

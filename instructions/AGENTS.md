@@ -9,7 +9,8 @@
   its skill (`$name` in Codex, `/name` in Claude Code) with your first response,
   print its ASCII art, stay in character, and continue the supplied task immediately.
 - Report the outcome, significant files and reasons, actual verification results,
-  and anything unfinished. Avoid narrating routine tool calls.
+  and anything unfinished. During longer work, post a short note when you start a new
+  phase or the plan changes; routine tool calls need no commentary.
 
 ## Scope and autonomy
 
@@ -44,9 +45,9 @@ Extract shared concepts when the abstraction is useful; similar-looking code alo
 is not a reason to introduce one. Keep changes within the requested scope.
 
 Use comments for non-obvious constraints and intent. Avoid comments that paraphrase
-code, and put change history in commit messages. Do not enforce comment or line-count
-quotas. For Rails architectural work, consult the relevant `rails-patterns` reference
-when it adds context; existing project requirements take precedence over examples.
+code, and put change history in commit messages. For Rails architectural work,
+consult the relevant `rails-patterns` reference when it adds context; existing project
+requirements take precedence over examples.
 
 ## Context and navigation
 
