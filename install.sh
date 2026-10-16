@@ -206,7 +206,7 @@ merge_hooks() {
         PreToolUse:[{matcher:"apply_patch",hooks:[{type:"command",command:($ledger + " codex-pre")}]}],
         PostToolUse:[{matcher:"apply_patch",hooks:[{type:"command",command:($ledger + " post")}]}]}')"
   fi
-  tmp="$(mktemp "$(dirname "$dest")/.bots-burgers.XXXXXX")" || return 1
+  tmp="$(mktemp "$(dirname "$dest")/.botsburgers.XXXXXX")" || return 1
   printf '%s' "$base" | jq --argjson owned "$owned" --argjson additions "$commands" \
     --arg host "$host" --arg status "$(shell_quote "$REPO_DIR/shell/statusline.sh")" \
     --argjson dead "$dead" --arg rels "$owned_paths" "$HOOK_SCRIPT_JQ"'

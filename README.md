@@ -1,4 +1,4 @@
-# bots-burgers
+# botsburgers
 🍔 A Bob's Burgers crew of skills, hooks, and shared instructions for Claude Code and Codex.
 
 ## Install
