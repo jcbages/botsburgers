@@ -1,9 +1,11 @@
+import fcntl
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -216,6 +218,137 @@ class LedgerTest(unittest.TestCase):
         self.install_hook('pre-commit', 'sed -i.bak "s/line10 A/line10 FORMATTED/" shared && rm shared.bak && git add shared\n')
         self.command('commit-mine', 'A', '-m', 'A')
         self.assertIn('line10 FORMATTED', self.git('show', 'HEAD:shared'))
+
+    def ledger(self, sid):
+        return self.root / '.git' / 'agent-ledger' / sid
+
+    def age(self, sid, days):
+        old = time.time() - days * 24 * 3600
+        for path in [self.ledger(sid), *self.ledger(sid).iterdir()]:
+            os.utime(path, (old, old))
+
+    def test_cleanup_drops_entries_committed_by_path(self):
+        self.edit('line10\n', 'line10 B\n', 'B')
+        self.git('commit', '-qm', 'B by path', '--', 'shared')
+        (self.root / 'a.txt').write_text('a\n')
+        self.git('add', 'a.txt')
+        self.git('commit', '-qm', 'a')
+        self.edit('line20\n', 'line20 A\n')
+        self.command('commit-mine', 'A', '-m', 'A')
+        self.assertFalse((self.ledger('B') / 'state').exists())
+        self.assertEqual('', self.git('for-each-ref', 'refs/agent-ledger/main/B'))
+
+    def test_cleanup_keeps_another_sessions_uncommitted_work(self):
+        self.edit('line10\n', 'line10 A\n')
+        self.edit('line13\n', 'line13 B\n', 'B')
+        self.command('commit-mine', 'A', '-m', 'A')
+        self.assertIn('+line13 B', self.command('mine', 'B'))
+        self.command('commit-mine', 'B', '-m', 'B')
+        self.assertIn('line13 B', self.git('show', 'HEAD:shared'))
+
+    def test_cleanup_removes_abandoned_and_idle_ledgers(self):
+        self.edit('line13\n', 'line13 OLD\n', 'OLD')
+        self.age('OLD', 31)
+        empty = self.ledger('EMPTY')
+        empty.mkdir(parents=True)
+        (empty / 'lock').write_text('')
+        self.age('EMPTY', 2)
+        self.edit('line10\n', 'line10 A\n')
+        self.command('commit-mine', 'A', '-m', 'A')
+        self.assertFalse(self.ledger('OLD').exists())
+        self.assertFalse(empty.exists())
+        self.assertEqual('', self.git('for-each-ref', 'refs/agent-ledger/main/OLD'))
+        self.assertTrue((self.ledger('A')).exists())
+
+    def test_cleanup_skips_a_busy_ledger(self):
+        self.edit('line10\n', 'line10 B\n', 'B')
+        self.git('commit', '-qm', 'B by path', '--', 'shared')
+        self.edit('line20\n', 'line20 A\n')
+        with (self.ledger('B') / 'lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            self.command('commit-mine', 'A', '-m', 'A')
+        self.assertTrue((self.ledger('B') / 'state').exists())
+
+    def test_damaged_ledger_of_another_session_does_not_block_a_commit(self):
+        broken = self.ledger('BROKEN')
+        broken.mkdir(parents=True)
+        (broken / 'state').write_bytes(b'\xff\xfe not utf-8\n')
+        self.edit('line10\n', 'line10 A\n')
+        output = self.command('commit-mine', 'A', '-m', 'A')
+        self.assertIn('cleanup skipped BROKEN', output)
+        self.assertIn('line10 A', self.git('show', 'HEAD:shared'))
+
+    def test_cleanup_waits_for_a_settled_head(self):
+        # On a detached HEAD, B's entry can look landed against an unrelated commit.
+        self.edit('line10\n', 'line10 B\n', 'B')
+        self.git('commit', '-qm', 'B by path', '--', 'shared')
+        self.git('checkout', '-q', '--detach')
+        self.edit('line20\n', 'line20 A\n')
+        self.command('commit-mine', 'A', '-m', 'A')
+        self.assertTrue((self.ledger('B') / 'state').exists())
+
+    def test_saving_moves_older_refs(self):
+        self.git('update-ref', 'refs/agent-ledger/A', 'HEAD^{tree}')
+        self.git('update-ref', 'refs/worktree/agent-ledger/A', 'HEAD^{tree}')
+        self.edit('line10\n', 'line10 A\n')
+        self.assertEqual('', self.git('for-each-ref', 'refs/agent-ledger/A'))
+        self.assertEqual('', self.git('for-each-ref', 'refs/worktree/agent-ledger/A'))
+        self.assertNotEqual('', self.git('for-each-ref', 'refs/agent-ledger/main/A'))
+
+    def linked_worktree(self):
+        linked = Path(self.temp.name + '-linked')
+        self.git('worktree', 'add', '-q', '--detach', str(linked))
+        self.addCleanup(shutil.rmtree, linked, True)
+        git_dir = Path(self.run_command('git', '-C', str(linked), 'rev-parse', '--absolute-git-dir').strip())
+        return linked, git_dir
+
+    def linked_edit(self, linked, sid, path, content):
+        payload = dict(session_id=sid, cwd=str(linked), tool_use_id=sid + '-' + path, tool_name='Write',
+                       tool_input=dict(file_path=path, content=content))
+        subprocess.check_output([str(HOOK), 'pre'], input=json.dumps(payload), cwd=linked, text=True)
+        (linked / path).write_text(content)
+        subprocess.check_output([str(HOOK), 'post'], input=json.dumps(payload), cwd=linked, text=True)
+
+    def test_gc_in_one_worktree_keeps_another_worktrees_ledger_blobs(self):
+        linked, git_dir = self.linked_worktree()
+        self.edit('line10\n', 'line10 MAIN ONLY\n')
+        self.linked_edit(linked, 'W', 'w.txt', 'linked only\n')
+        main_shadow = (self.ledger('A') / 'state').read_text().split('\t')[2]
+        linked_shadow = (git_dir / 'agent-ledger' / 'W' / 'state').read_text().split('\t')[2]
+        self.run_command('git', '-C', str(linked), 'gc', '-q', '--prune=now')
+        self.git('cat-file', '-e', main_shadow)
+        self.git('gc', '-q', '--prune=now')
+        self.git('cat-file', '-e', linked_shadow)
+
+    def test_cleanup_in_a_linked_worktree_keeps_the_main_trees_anchor(self):
+        linked, git_dir = self.linked_worktree()
+        self.edit('line13\n', 'line13 A\n')                 # main tree's live ledger for A
+        anchor = self.git('rev-parse', 'refs/agent-ledger/main/A')
+        old = git_dir / 'agent-ledger' / 'A'                 # the same session, long idle in the linked tree
+        old.mkdir(parents=True)
+        (old / 'lock').write_text('')
+        stamp = time.time() - 31 * 24 * 3600
+        os.utime(old / 'lock', (stamp, stamp))
+        self.linked_edit(linked, 'C', 'y', 'y\n')
+        subprocess.check_output([str(ROOT / 'skills/gene/scripts/commit-mine'), '-m', 'C'], cwd=linked,
+                                env=dict(os.environ, LEDGER_SESSION='C'), text=True, stderr=subprocess.STDOUT)
+        self.assertFalse(old.exists())
+        self.assertEqual(anchor, self.git('rev-parse', 'refs/agent-ledger/main/A'))
+
+    def test_a_session_records_again_after_its_ledger_was_removed(self):
+        self.edit('line13\n', 'line13 OLD\n', 'OLD')
+        self.age('OLD', 31)
+        self.edit('line10\n', 'line10 A\n')
+        self.command('commit-mine', 'A', '-m', 'A')
+        self.assertFalse(self.ledger('OLD').exists())
+        self.edit('line20\n', 'line20 OLD\n', 'OLD')
+        self.assertEqual('shared\n', self.command('mine', 'OLD', '--files'))
+
+    def test_commit_cleanup_strip_removes_comments(self):
+        self.edit('line10\n', 'line10 A\n')
+        self.git('config', 'commit.cleanup', 'strip')
+        self.command('commit-mine', 'A', '-m', 'Subject\n# a comment\n')
+        self.assertEqual('Subject\n', self.git('log', '-1', '--format=%B').rstrip('\n') + '\n')
 
     def test_emptied_message_commits_nothing(self):
         self.edit('line10\n', 'line10 A\n')

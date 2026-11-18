@@ -107,5 +107,21 @@ _ledger_anchor() {
               printf '100644 blob %s\t%s\n' "$b" "b$n"; n=$((n+1))
             done
           done < "$s" | sort -u -k4 | git mktree 2>/dev/null)"
-  [ -n "$tree" ] && git update-ref "refs/agent-ledger/$sid" "$tree" 2>/dev/null || true
+  [ -n "$tree" ] || return 0
+  # Same layout as ledger_capture.py: a shared ref per worktree, because gc in
+  # one worktree ignores another's refs/worktree/*.
+  git update-ref "$(_ledger_ref "$sid")" "$tree" 2>/dev/null || return 0
+  git update-ref -d "refs/agent-ledger/$sid" 2>/dev/null
+  git update-ref -d "refs/worktree/agent-ledger/$sid" 2>/dev/null
+  return 0
+}
+
+_ledger_ref() { # <sid>
+  local common
+  common="$(cd "$(git rev-parse --git-common-dir)" && pwd -P)"
+  if [ "$common" = "$(cd "$_LEDGER_GITDIR" && pwd -P)" ]; then
+    printf 'refs/agent-ledger/main/%s' "$1"
+  else
+    printf 'refs/agent-ledger/%s/%s' "${_LEDGER_GITDIR##*/}" "$1"
+  fi
 }

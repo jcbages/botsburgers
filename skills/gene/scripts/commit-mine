@@ -219,8 +219,13 @@ fi
 printf '%s\n' "$MSG" > "$msgfile"
 run_hook prepare-commit-msg "$msgfile" message || hook_failed prepare-commit-msg
 if [ "$VERIFY" = 1 ]; then run_hook commit-msg "$msgfile" || hook_failed commit-msg; fi
-# As `git commit -m` does: tidy whitespace and refuse an empty message.
-git stripspace < "$msgfile" > "$msgfile.clean" && mv "$msgfile.clean" "$msgfile"
+# As `git commit -m` does: clean up per commit.cleanup (whitespace unless it
+# says strip or verbatim) and refuse an empty message.
+case "$(git config commit.cleanup 2>/dev/null)" in
+  verbatim) ;;
+  strip)    git stripspace --strip-comments < "$msgfile" > "$msgfile.clean" && mv "$msgfile.clean" "$msgfile" ;;
+  *)        git stripspace < "$msgfile" > "$msgfile.clean" && mv "$msgfile.clean" "$msgfile" ;;
+esac
 [ -s "$msgfile" ] || { echo "commit-mine: the commit message is empty; nothing was committed." >&2; exit 1; }
 subject="$(head -1 "$msgfile")"
 

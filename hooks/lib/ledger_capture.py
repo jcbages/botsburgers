@@ -4,11 +4,13 @@ import hashlib
 import json
 import os
 import shlex
+import shutil
 import stat
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 
 
 def git(*args, data=None):
@@ -151,6 +153,31 @@ def merge(current, base, other):
         return blob(result.stdout) if result.returncode == 0 else None
 
 
+# Ledgers live in each worktree's git dir, so anchors are namespaced by worktree:
+# refs/agent-ledger/<main | linked git dir name>/<sid>. They must be ordinary
+# shared refs, because gc in one worktree ignores another's refs/worktree/*.
+LEGACY_REF = 'refs/agent-ledger/'
+INTERIM_REF = 'refs/worktree/agent-ledger/'
+
+
+def worktree_id(git_dir):
+    common = Path(git('rev-parse', '--git-common-dir').decode().strip()).resolve()
+    return 'main' if common == Path(git_dir).resolve() else Path(git_dir).name
+
+
+def ledger_ref(directory, sid):
+    return f'refs/agent-ledger/{worktree_id(directory.parent.parent)}/{sid}'
+
+
+def drop_refs(directory, sid, current=True, legacy=True):
+    # The legacy ref is shared by every worktree; only the main one, or the
+    # session itself on save, may delete it.
+    refs = ([ledger_ref(directory, sid)] if current else []) + ([LEGACY_REF + sid] if legacy else [])
+    refs.append(INTERIM_REF + sid)   # this worktree's own, from a short-lived layout
+    for ref in refs:
+        subprocess.call(['git', 'update-ref', '-d', ref], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def save(directory, state, sid):
     path = directory / 'state'
     temp = directory / 'state.tmp'
@@ -158,7 +185,117 @@ def save(directory, state, sid):
     temp.replace(path)
     hashes = sorted({sha for entry in state.values() for sha in entry[:2] if sha != '-'})
     tree = git('mktree', data=''.join(f'100644 blob {sha}\tb{i}\n' for i, sha in enumerate(hashes)).encode()).decode().strip()
-    git('update-ref', f'refs/agent-ledger/{sid}', tree)
+    git('update-ref', ledger_ref(directory, sid), tree)
+    drop_refs(directory, sid, current=False)
+
+
+def lock_ledger(directory, blocking=True):
+    """Open and lock directory/lock; None if non-blocking and busy.
+
+    A lock is only good while its file is still the one at the path: cleanup
+    renames a forgotten ledger away, and a waiter must not keep the old file.
+    """
+    path = directory / 'lock'
+    while True:
+        directory.mkdir(parents=True, exist_ok=True)
+        try:
+            lock = path.open('a')
+        except FileNotFoundError:   # renamed away between the mkdir and the open
+            continue
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock.close()
+            return None
+        try:
+            if os.fstat(lock.fileno()).st_ino == os.stat(path).st_ino:
+                return lock
+        except FileNotFoundError:
+            pass
+        lock.close()
+
+
+ABANDONED = 30 * 24 * 3600   # a ledger untouched this long belongs to no live session
+IDLE = 24 * 3600              # an emptied ledger directory idle this long can go
+IN_PROGRESS = ('MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'BISECT_LOG', 'rebase-merge', 'rebase-apply')
+
+
+def head_blob(name):
+    try:
+        return git('rev-parse', '-q', '--verify', f'HEAD:{name}').decode().strip()
+    except subprocess.CalledProcessError:
+        return '-'
+
+
+def head_is_settled(git_dir):
+    """HEAD is a branch tip with no operation in progress, so it can judge entries."""
+    if subprocess.call(['git', 'symbolic-ref', '-q', 'HEAD'], stdout=subprocess.DEVNULL) != 0:
+        return False
+    return not any((git_dir / name).exists() for name in IN_PROGRESS)
+
+
+def forget(directory, sid, legacy):
+    # Called with the ledger locked. Rename the directory away first, so a waiting
+    # process finds its lock replaced and starts afresh; only then drop the refs.
+    tombstone = directory.with_name(f'.forgotten.{sid}.{os.getpid()}.{time.time_ns()}')
+    try:
+        directory.rename(tombstone)
+    except OSError:
+        return
+    drop_refs(tombstone, sid, legacy=legacy)
+    shutil.rmtree(tombstone, ignore_errors=True)
+
+
+def prune_session(directory, sid, now, judge_head, legacy):
+    files = list(directory.iterdir())
+    newest = max((f.stat().st_mtime for f in files), default=0)
+    if now - newest > ABANDONED:
+        forget(directory, sid, legacy)
+        return
+    path = directory / 'state'
+    if path.exists() and judge_head:
+        state = dict((line.split('\t')[0], line.split('\t')[1:]) for line in path.read_text().splitlines())
+        # A verified entry that landed (HEAD holds the shadow) or was undone (the
+        # shadow is the origin) has nothing left to commit, and a later edit starts
+        # a fresh entry from disk. Contested entries stay to warn their owner.
+        def settled(name, entry):
+            return entry[2:3] == ['verified'] and (entry[0] == entry[1] or head_blob(name) == entry[1])
+        live = {name: entry for name, entry in state.items() if not settled(name, entry)}
+        if live and live != state:
+            save(directory, live, sid)
+        elif not live:
+            path.unlink()
+            drop_refs(directory, sid, legacy=legacy)
+    pending = any(f.name.startswith('pending.') for f in directory.iterdir())
+    if not path.exists() and not pending and now - newest > IDLE:
+        forget(directory, sid, legacy)
+
+
+def prune(git_dir, own_sid):
+    """Drop what no other session can still commit from their ledgers.
+
+    Each is pruned under its own lock and skipped while busy, and a ledger that
+    cannot be read is skipped with a warning: cleanup never blocks a commit. This
+    session's own ledger is left to commit-mine, which reports its entries itself.
+    """
+    ledgers = git_dir / 'agent-ledger'
+    if not ledgers.is_dir():
+        return
+    now = time.time()
+    judge_head = head_is_settled(git_dir)
+    main_worktree = Path(git('rev-parse', '--git-common-dir').decode().strip()).resolve() == git_dir.resolve()
+    for leftover in ledgers.glob('.forgotten.*'):   # from a cleanup that was interrupted
+        shutil.rmtree(leftover, ignore_errors=True)
+    for directory in sorted(p for p in ledgers.iterdir()
+                            if p.is_dir() and p.name != own_sid and not p.name.startswith('.')):
+        try:
+            lock = lock_ledger(directory, blocking=False)
+            if lock is None:
+                continue
+            with lock:
+                prune_session(directory, directory.name, now, judge_head, main_worktree)
+        except Exception as error:   # one bad ledger must not stop the rest, or the commit
+            print(f'ledger: cleanup skipped {directory.name}: {error}', file=sys.stderr)
 
 
 def capture(mode, payload, directory, root, sid):
@@ -225,9 +362,7 @@ def main():
         except subprocess.CalledProcessError:
             return
         directory = git_dir / 'agent-ledger' / sid
-        directory.mkdir(parents=True, exist_ok=True)
-        with (directory / 'lock').open('a') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with lock_ledger(directory):
             context = directory / 'codex-context-shown'
             if not context.exists():
                 context.touch()
@@ -247,9 +382,22 @@ def main():
     if read_only and not lock_path.exists():
         subprocess.call(sys.argv[2:], env=dict(os.environ, LEDGER_LOCKED='1'))
         return
-    with lock_path.open('r' if read_only else 'a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_SH if read_only else fcntl.LOCK_EX)
+    if read_only:
+        try:
+            lock = lock_path.open('r')
+        except FileNotFoundError:   # forgotten meanwhile: nothing to guard, read as is
+            subprocess.call(sys.argv[2:], env=dict(os.environ, LEDGER_LOCKED='1'))
+            return
+        fcntl.flock(lock, fcntl.LOCK_SH)
+    else:
+        lock = lock_ledger(directory)
+    with lock:
         if mode == 'run':
+            if Path(sys.argv[2]).name == 'commit-mine':
+                try:
+                    prune(directory.parent.parent, sid)
+                except Exception as error:   # cleanup never blocks a commit
+                    print(f'ledger: cleanup skipped: {error}', file=sys.stderr)
             environment = dict(os.environ, LEDGER_LOCKED='1')
             raise SystemExit(subprocess.call(sys.argv[2:], env=environment))
         os.chdir(root)

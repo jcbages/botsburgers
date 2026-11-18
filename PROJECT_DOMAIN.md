@@ -59,7 +59,13 @@ to that directory, including `../_shared/`.
   them only on Edit/Write. Shell
   mutations and unsupported patch forms are not automatically attributed. Codex
   UserPromptSubmit supplies the session ID as context for explicit ledger commands;
-  PreToolUse does not change command permissions.
+  PreToolUse does not change command permissions. Each `commit-mine` run prunes other
+  sessions' ledgers: verified entries already in HEAD or undone (only on a branch tip with
+  no merge, rebase or bisect in progress), ledgers idle 30 days with whatever they still
+  hold, and emptied directories idle a day. Busy or unreadable ledgers are skipped and
+  contested entries stay. Blobs are anchored by shared refs namespaced per worktree,
+  `refs/agent-ledger/<main | linked git dir name>/<sid>`; `refs/worktree/*` would not
+  survive a gc run from another worktree.
 - `skills/gene/scripts/mine`: inspect the session record; `commit-mine`: private-index replay and
   compare-and-swap commit with the repository's commit hooks, then a locked shared-index update
   for committed paths nobody staged.
