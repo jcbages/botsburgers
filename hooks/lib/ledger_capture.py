@@ -255,14 +255,19 @@ def prune_session(directory, sid, now, judge_head, legacy):
     path = directory / 'state'
     if path.exists() and judge_head:
         state = dict((line.split('\t')[0], line.split('\t')[1:]) for line in path.read_text().splitlines())
-        # A verified entry that landed (HEAD holds the shadow) or was undone (the
-        # shadow is the origin) has nothing left to commit, and a later edit starts
-        # a fresh entry from disk. Contested entries stay to warn their owner.
+        # An entry that landed (HEAD holds the shadow) or was undone (the shadow is
+        # the origin) has nothing left to commit, and a later edit starts a fresh
+        # entry from disk. That covers older records too ("ok"), which commit-mine
+        # never commits anyway. Contested entries stay to warn their owner.
         def settled(name, entry):
-            return entry[2:3] == ['verified'] and (entry[0] == entry[1] or head_blob(name) == entry[1])
+            return (len(entry) >= 2 and entry[2:3] != ['contested']
+                    and (entry[0] == entry[1] or head_blob(name) == entry[1]))
         live = {name: entry for name, entry in state.items() if not settled(name, entry)}
         if live and live != state:
+            before = path.stat()
             save(directory, live, sid)
+            # Pruning is not activity: keep the ledger's idle clock where it was.
+            os.utime(path, (before.st_atime, before.st_mtime))
         elif not live:
             path.unlink()
             drop_refs(directory, sid, legacy=legacy)

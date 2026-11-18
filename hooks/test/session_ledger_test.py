@@ -269,6 +269,32 @@ class LedgerTest(unittest.TestCase):
             self.command('commit-mine', 'A', '-m', 'A')
         self.assertTrue((self.ledger('B') / 'state').exists())
 
+    def test_cleanup_drops_settled_older_format_records(self):
+        sha = self.git('rev-parse', 'HEAD:shared').strip()
+        old = self.ledger('OLDFORMAT')
+        old.mkdir(parents=True)
+        (old / 'state').write_text(f'shared\t-\t{sha}\tok\nother\t-\tdeadbeef\tok\n')
+        self.edit('line10\n', 'line10 A\n')
+        self.command('commit-mine', 'A', '-m', 'A')
+        self.assertEqual('other\t-\tdeadbeef\tok\n', (old / 'state').read_text())
+
+    def test_partial_cleanup_keeps_the_idle_clock(self):
+        self.edit('line10\n', 'line10 B\n', 'B')
+        self.git('commit', '-qm', 'B by path', '--', 'shared')
+        self.edit('line20\n', 'line20 B\n', 'B')
+        self.git('commit', '-qm', 'B again', '--', 'shared')
+        payload = self.payload('B', tool='Write', file_path='b.txt', content='b\n')
+        self.hook('pre', payload)
+        (self.root / 'b.txt').write_text('b\n')
+        self.hook('post', payload)
+        self.age('B', 10)
+        aged = (self.ledger('B') / 'state').stat().st_mtime
+        self.edit('line30\n', 'line30 A\n')
+        self.command('commit-mine', 'A', '-m', 'A')
+        state = (self.ledger('B') / 'state')
+        self.assertEqual(['b.txt'], [line.split('\t')[0] for line in state.read_text().splitlines()])
+        self.assertAlmostEqual(aged, state.stat().st_mtime, delta=1)
+
     def test_damaged_ledger_of_another_session_does_not_block_a_commit(self):
         broken = self.ledger('BROKEN')
         broken.mkdir(parents=True)
