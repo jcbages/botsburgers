@@ -61,8 +61,8 @@ to that directory, including `../_shared/`.
   UserPromptSubmit supplies the session ID as context for explicit ledger commands;
   PreToolUse does not change command permissions.
 - `skills/gene/scripts/mine`: inspect the session record; `commit-mine`: private-index replay and
-  compare-and-swap commit. Neither dirty filenames nor command-duration snapshots
-  establish ownership. Unsupported or ambiguous edits must not be committed as verified.
+  compare-and-swap commit, then a locked shared-index update for landed paths nobody staged.
+  Neither dirty filenames nor command-duration snapshots establish ownership. Unsupported or ambiguous edits must not be committed as verified.
 - `hooks/lib/bash_command.sh`: shared command/path parsing for action guards.
 - `shell/statusline.sh`: optional Claude display.
 

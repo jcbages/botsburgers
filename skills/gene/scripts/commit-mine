@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Commit verified explicit edits through a private index; never write the shared index.
+# Commit verified explicit edits through a private index. Afterwards the shared index
+# moves to the commit only for landed paths nobody staged.
 #
 #   commit-mine -m "Add the thing"       commit recorded edits
 #   commit-mine -m "..." path/a path/b   only those recorded paths
@@ -19,7 +20,7 @@ while [ $# -gt 0 ]; do
     -m|--message)  MSG="$2"; shift 2 ;;
     -F|--file)     MSG="$(cat "$2")"; shift 2 ;;
     -n|--dry-run)  DRY=1; shift ;;
-    -h|--help)     sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)     sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*)            echo "commit-mine: unknown flag $1" >&2; exit 2 ;;
     *)             ONLY+=("$1"); shift ;;
   esac
@@ -44,7 +45,7 @@ idx="$gd/commit-mine-index.$$"
 export GIT_INDEX_FILE="$idx"
 git read-tree "$base"
 
-landing=(); skipped=()
+landing=(); landed_entry=(); skipped=(); index_kept=()
 while IFS= read -r p; do
   [ -n "$p" ] || continue
   entry="$(ledger_get "$p")"
@@ -62,7 +63,7 @@ while IFS= read -r p; do
     { [ -e "$p" ] || [ -L "$p" ]; } && { skipped+=("$p — deleted here but present in the tree"); continue; }
     head_mode="$(git ls-tree "$base" -- "$p" | awk '{print $1}')"
     { [ "$(_ledger_head_blob "$p")" = "$origin" ] && [ "$head_mode" = "$origin_mode" ]; } || { skipped+=("$p — changed in HEAD since deletion was recorded"); continue; }
-    git update-index --force-remove -- "$p" && landing+=("$p"); continue
+    git update-index --force-remove -- "$p" && { landing+=("$p"); landed_entry+=("-"); }; continue
   fi
   head_blob="$(git rev-parse -q --verify "$base:$p" 2>/dev/null)" || head_blob="-"
   if [ "$head_blob" = "$origin" ]; then
@@ -73,7 +74,7 @@ while IFS= read -r p; do
   [ "$merged" = "$head_blob" ] && { skipped+=("$p — already in HEAD"); continue; }
   mode="$(git ls-tree "$base" -- "$p" 2>/dev/null | awk '{print $1}')"
   [ -n "$mode" ] || mode="${origin_mode:-100644}"
-  git update-index --add --cacheinfo "$mode,$merged,$p" && landing+=("$p")
+  git update-index --add --cacheinfo "$mode,$merged,$p" && { landing+=("$p"); landed_entry+=("$mode $merged"); }
 done <<< "$paths"
 
 tree="$(git write-tree)"
@@ -82,7 +83,63 @@ unset GIT_INDEX_FILE; rm -f "$idx"
 report() {
   [ ${#landing[@]} -gt 0 ] && { echo "landing:"; printf '  %s\n' "${landing[@]}"; }
   [ ${#skipped[@]} -gt 0 ] && { echo "skipped:"; printf '  %s\n' "${skipped[@]}"; }
+  [ ${#index_kept[@]} -gt 0 ] && { echo "shared index not updated (review before a plain git commit):"; printf '  %s\n' "${index_kept[@]}"; }
   return 0
+}
+
+# The shared index still describes the old HEAD for the landed paths, so a plain
+# `git commit` would revert them. Move each entry that still matches the old HEAD
+# to the committed version. An entry someone staged, or one carrying
+# assume-unchanged or skip-worktree, stays as it is.
+#
+# Check and write happen while git's own index.lock is held for the whole pass,
+# so another writer's `git add` fails visibly instead of being silently replaced.
+# The lock stays an empty marker: the edits go to a private copy that a rename
+# publishes, so no git command ever reads a lock path that might be gone or
+# belong to another process. A signal discards the copy and exits.
+sync_lock="" sync_copy=""
+sync_cleanup() { rm -f "$sync_copy"; [ -n "$sync_lock" ] && rm -f "$sync_lock"; sync_lock=""; }
+sync_index() { # landing[], landed_entry[] -> index_kept[]
+  local shared="$gd/index" tries=0 i p want old current tag
+  until ( set -C; : > "$gd/index.lock" ) 2>/dev/null; do
+    tries=$((tries + 1))
+    if [ "$tries" -ge 20 ]; then
+      for p in "${landing[@]}"; do index_kept+=("$p — index busy"); done
+      return 0
+    fi
+    sleep 0.1
+  done
+  sync_lock="$gd/index.lock" sync_copy="$gd/commit-mine-sync.$$"
+  trap sync_cleanup EXIT
+  trap 'sync_cleanup; exit 130' INT
+  trap 'sync_cleanup; exit 143' TERM
+  if ! cp -p "$shared" "$sync_copy" 2>/dev/null; then
+    trap - EXIT INT TERM; sync_cleanup
+    for p in "${landing[@]}"; do index_kept+=("$p — index unreadable"); done
+    return 0
+  fi
+  export GIT_INDEX_FILE="$sync_copy"
+  i=0
+  while [ "$i" -lt ${#landing[@]} ]; do
+    p="${landing[$i]}"; want="${landed_entry[$i]}"; i=$((i + 1))
+    [ "$want" = "-" ] && want=""
+    old="$(git --literal-pathspecs ls-tree "$base" -- "$p" | awk '{print $1, $3}')"
+    current="$(git --literal-pathspecs ls-files -s -- "$p" | awk '{print $1, $2, $3}')"
+    [ -n "$current" ] && current="${current% 0}"   # a conflict stage never matches
+    tag="$(git --literal-pathspecs ls-files -v -- "$p" | cut -c1)"
+    [ "$current" = "$want" ] && continue           # already staged as committed
+    { [ "$current" = "$old" ] && { [ -z "$tag" ] || [ "$tag" = H ]; }; } || { index_kept+=("$p"); continue; }
+    if [ -z "$want" ]; then
+      git update-index --force-remove -- "$p"
+    else
+      git update-index --add --cacheinfo "${want% *},${want#* },$p"
+    fi 2>/dev/null || index_kept+=("$p — index update failed")
+  done
+  git update-index -q --refresh >/dev/null 2>&1   # stat data for the entries written above
+  unset GIT_INDEX_FILE
+  mv "$sync_copy" "$shared" || for p in "${landing[@]}"; do index_kept+=("$p — index not replaced"); done
+  trap - EXIT INT TERM
+  sync_cleanup
 }
 
 [ ${#landing[@]} -gt 0 ] || { echo "commit-mine: nothing to commit"; report; exit 0; }
@@ -97,5 +154,6 @@ if ! git update-ref -m "commit: $(printf '%s' "$MSG" | head -1)" HEAD "$sha" "$b
 fi
 
 ledger_drop "${landing[@]}"
+sync_index
 echo "committed $(git rev-parse --short HEAD)  $(printf '%s' "$MSG" | head -1)"
 report

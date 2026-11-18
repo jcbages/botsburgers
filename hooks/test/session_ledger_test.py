@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -58,10 +59,122 @@ class LedgerTest(unittest.TestCase):
         self.command('commit-mine', 'A', '-m', 'A')
         self.assertIn('+line10 A', self.git('show', '--format=', '-U0'))
         self.assertNotIn('line13 B', self.git('show', '--format=', '-U0'))
+        # B's hunk is still only in the work tree, never staged as a revert of A.
+        self.assertEqual(' M shared\n', self.git('status', '--porcelain'))
         self.command('commit-mine', 'B', '-m', 'B')
         self.assertIn('+line13 B', self.git('show', '--format=', '-U0'))
-        self.assertIn('line10\n', self.git('show', ':shared'))
-        self.assertIn('line13\n', self.git('show', ':shared'))
+        self.assertEqual('', self.git('status', '--porcelain'))
+
+    def test_commit_leaves_shared_index_at_new_head(self):
+        self.edit('line10\n', 'line10 A\n')
+        self.command('commit-mine', 'A', '-m', 'A')
+        self.assertEqual('', self.git('diff', '--cached', '--name-only'))
+        self.assertEqual('', self.git('status', '--porcelain'))
+
+    def test_staged_version_of_landed_path_is_kept(self):
+        self.edit('line10\n', 'line10 A\n')
+        staged = self.root / 'staged'
+        staged.write_text('STAGED BY OTHER\n')
+        blob = self.git('hash-object', '-w', 'staged').strip()
+        staged.unlink()
+        self.git('update-index', '--cacheinfo', f'100644,{blob},shared')
+        output = self.command('commit-mine', 'A', '-m', 'A')
+        self.assertIn('line10 A', self.git('show', 'HEAD:shared'))
+        self.assertNotIn('STAGED BY OTHER', self.git('show', 'HEAD:shared'))
+        self.assertEqual('STAGED BY OTHER\n', self.git('show', ':shared'))
+        self.assertIn('shared index not updated', output)
+
+    def test_own_staging_is_not_reported(self):
+        self.edit('line10\n', 'line10 A\n')
+        self.git('add', 'shared')
+        output = self.command('commit-mine', 'A', '-m', 'A')
+        self.assertNotIn('shared index not updated', output)
+        self.assertEqual('', self.git('status', '--porcelain'))
+
+    def test_index_flags_are_kept(self):
+        self.git('update-index', '--assume-unchanged', 'shared')
+        self.edit('line10\n', 'line10 A\n')
+        output = self.command('commit-mine', 'A', '-m', 'A')
+        self.assertIn('line10 A', self.git('show', 'HEAD:shared'))
+        self.assertIn('shared index not updated', output)
+        self.assertTrue(self.git('ls-files', '-v', 'shared').startswith('h '))
+
+    def test_busy_index_lands_commit_and_leaves_lock(self):
+        self.edit('line10\n', 'line10 A\n')
+        lock = self.root / '.git' / 'index.lock'
+        lock.write_text('')
+        index = self.git('show', ':shared')
+        output = self.command('commit-mine', 'A', '-m', 'A')
+        self.assertIn('line10 A', self.git('show', 'HEAD:shared'))
+        self.assertIn('shared — index busy', output)
+        self.assertTrue(lock.exists())
+        lock.unlink()
+        self.assertEqual(index, self.git('show', ':shared'))
+
+    def test_concurrent_staging_during_sync_is_refused_not_overwritten(self):
+        # A wrapper stages for another writer at the moment commit-mine writes its
+        # locked copy. The other writer must get git's lock error, not lose silently.
+        self.edit('line10\n', 'line10 A\n')
+        real_git = shutil.which('git')
+        other = self.root / '.other-blob'
+        other.write_text('B STAGED\n')
+        blob = self.git('hash-object', '-w', '.other-blob').strip()
+        other.unlink()
+        bin_dir = Path(self.temp.name + '-bin')
+        bin_dir.mkdir()
+        self.addCleanup(shutil.rmtree, bin_dir)
+        result = bin_dir / 'result'
+        wrapper = bin_dir / 'git'
+        wrapper.write_text(
+            '#!/bin/sh\n'
+            'case "${GIT_INDEX_FILE:-shared}" in *commit-mine-index*) ;; *)\n'
+            '  if [ "$1" = update-index ] && [ "$2" = --add ]; then\n'
+            f'    env -u GIT_INDEX_FILE "{real_git}" update-index --cacheinfo "100644,{blob},shared" 2>/dev/null\n'
+            f'    echo $? > "{result}"\n'
+            '  fi ;;\n'
+            'esac\n'
+            f'exec "{real_git}" "$@"\n')
+        wrapper.chmod(0o755)
+        env = dict(os.environ, LEDGER_SESSION='A', PATH=f'{bin_dir}:{os.environ["PATH"]}')
+        self.run_command(str(ROOT / 'skills' / 'gene' / 'scripts' / 'commit-mine'), '-m', 'A', env=env)
+        self.assertNotEqual('0', result.read_text().strip())
+        self.assertIn('line10 A', self.git('show', ':shared'))
+        self.assertEqual('', self.git('status', '--porcelain'))
+
+    def test_signal_during_sync_keeps_shared_index_whole(self):
+        for i in range(3):
+            (self.root / f'f{i}').write_text('x\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'more')
+        tracked = self.git('ls-files')
+        self.edit('line10\n', 'line10 A\n')
+        payload = self.payload(tool='Write', file_path='zz_new', content='n\n')
+        self.hook('pre', payload)
+        (self.root / 'zz_new').write_text('n\n')
+        self.hook('post', payload)
+        bin_dir = Path(self.temp.name + '-bin')
+        bin_dir.mkdir()
+        self.addCleanup(shutil.rmtree, bin_dir)
+        killed = bin_dir / 'killed'
+        wrapper = bin_dir / 'git'
+        wrapper.write_text(
+            '#!/bin/sh\n'
+            'case "${GIT_INDEX_FILE:-}" in *commit-mine-sync*)\n'
+            f'  if [ "$1" = update-index ] && [ "$2" = --add ] && [ ! -e "{killed}" ]; then\n'
+            f'    : > "{killed}"; kill -TERM $PPID\n'
+            '  fi ;;\n'
+            'esac\n'
+            f'exec "{shutil.which("git")}" "$@"\n')
+        wrapper.chmod(0o755)
+        env = dict(os.environ, LEDGER_SESSION='A', PATH=f'{bin_dir}:{os.environ["PATH"]}')
+        run = subprocess.run([str(ROOT / 'skills' / 'gene' / 'scripts' / 'commit-mine'), '-m', 'A'],
+                             cwd=self.root, env=env, text=True, capture_output=True)
+        self.assertTrue(killed.exists())
+        self.assertNotEqual(0, run.returncode)
+        self.assertIn('line10 A', self.git('show', 'HEAD:shared'))
+        self.assertEqual(tracked, self.git('ls-files'))   # old index, nothing dropped
+        self.assertFalse((self.root / '.git' / 'index.lock').exists())
+        self.assertEqual([], list((self.root / '.git').glob('commit-mine-sync.*')))
 
     def test_same_target_concurrent_write_is_contested(self):
         payload = self.payload(file_path='shared', old_string='line10\n', new_string='line10 A\n')
@@ -116,12 +229,15 @@ class LedgerTest(unittest.TestCase):
         self.hook('post', payload)
         self.command('commit-mine', 'A', '-m', 'patch')
         self.assertEqual('new content\n', self.git('show', 'HEAD:new'))
+        self.assertEqual('', self.git('status', '--porcelain'))
         payload = self.payload(tool='apply_patch', patch='*** Begin Patch\n*** Delete File: new\n*** End Patch\n')
         self.hook('pre', payload)
         (self.root / 'new').unlink()
         self.hook('post', payload)
         self.command('commit-mine', 'A', '-m', 'delete')
         self.assertNotIn('new', self.git('ls-tree', '--name-only', 'HEAD'))
+        self.assertEqual('', self.git('ls-files', 'new'))
+        self.assertEqual('', self.git('status', '--porcelain'))
 
     def test_codex_absolute_patch_through_symlinked_workspace(self):
         alias = Path(self.temp.name) / 'workspace'
