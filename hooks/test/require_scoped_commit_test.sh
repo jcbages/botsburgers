@@ -37,6 +37,13 @@ expect_cmd allow "commit-tree"                 'git commit-tree $tree -p $base -
 expect_cmd allow "the ref move"                "git update-ref HEAD abc123 def456"
 expect_cmd allow "a private-index add"         'GIT_INDEX_FILE=.git/gene-index git add -- a.rb'
 expect_cmd allow "commit-mine, the sanctioned path" "scripts/commit-mine -m x"
+expect_cmd allow "a message that mentions git commit" 'scripts/commit-mine -m "a plain git commit would undo it"'
+expect_cmd allow "a multi-line message mentioning it" "scripts/commit-mine -m 'Subject
+
+Run git commit -a and it sweeps.'"
+expect_cmd allow "a --message= mentioning it"  'scripts/commit-mine --message="git commit -a hazard"'
+expect_cmd warn  "a commit whose message names git commit" 'git commit -m "explain git commit"'
+expect_cmd warn  "an option ending in m is not -m" 'foo --param "x; git commit -a"'
 expect_cmd allow "unrelated git"               "git status"
 # Command-shaped text is treated as a command, as in the sibling gate: a heredoc
 # body is the way to quote one, and nothing else needs to.

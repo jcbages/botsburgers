@@ -141,6 +141,121 @@ class LedgerTest(unittest.TestCase):
         self.assertIn('line10 A', self.git('show', ':shared'))
         self.assertEqual('', self.git('status', '--porcelain'))
 
+    def install_hook(self, name, body, directory='.git/hooks'):
+        hook = self.root / directory / name
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        hook.write_text('#!/bin/sh\n' + body)
+        hook.chmod(0o755)
+
+    def test_failing_pre_commit_blocks_and_no_verify_skips_it(self):
+        self.edit('line10\n', 'line10 A\n')
+        seen = self.root / '.git' / 'seen'
+        self.install_hook('pre-commit', f'git diff --cached > "{seen}"\nexit 1\n')
+        before = self.git('rev-parse', 'HEAD')
+        with self.assertRaises(subprocess.CalledProcessError) as failure:
+            self.command('commit-mine', 'A', '-m', 'A')
+        self.assertIn('pre-commit hook failed', failure.exception.output)
+        self.assertEqual(before, self.git('rev-parse', 'HEAD'))
+        self.assertIn('+line10 A', seen.read_text())
+        self.assertEqual('shared\n', self.command('mine', 'A', '--files'))   # ledger kept
+        self.command('commit-mine', 'A', '--no-verify', '-m', 'A')
+        self.assertIn('line10 A', self.git('show', 'HEAD:shared'))
+
+    def test_pre_commit_is_not_run_while_others_have_uncommitted_work(self):
+        # A restaging or stash-and-restore hook would take or rewrite B's hunk.
+        self.edit('line10\n', 'line10 A\n')
+        self.edit('line13\n', 'line13 B\n', 'B')
+        ran = self.root / '.git' / 'ran'
+        self.install_hook('pre-commit', f': > "{ran}"\ngit checkout -- . && git add -u\n')
+        output = self.command('commit-mine', 'A', '-m', 'A')
+        self.assertFalse(ran.exists())
+        self.assertIn('pre-commit hook not run', output)
+        self.assertIn('line10 A', self.git('show', 'HEAD:shared'))
+        self.assertNotIn('line13 B', self.git('show', 'HEAD:shared'))
+        self.assertIn('line13 B', self.file.read_text())
+
+    def test_pre_commit_staging_a_path_outside_the_commit_aborts(self):
+        self.edit('line10\n', 'line10 A\n')
+        self.install_hook('pre-commit', 'echo generated > other && git add other\n')
+        before = self.git('rev-parse', 'HEAD')
+        with self.assertRaises(subprocess.CalledProcessError) as failure:
+            self.command('commit-mine', 'A', '-m', 'A')
+        self.assertIn('outside this commit', failure.exception.output)
+        self.assertEqual(before, self.git('rev-parse', 'HEAD'))
+        self.assertEqual('shared\n', self.command('mine', 'A', '--files'))
+
+    def test_pre_commit_restaging_a_non_ascii_path_lands(self):
+        payload = self.payload(tool='Write', file_path='café.txt', content='raw\n')
+        self.hook('pre', payload)
+        (self.root / 'café.txt').write_text('raw\n')
+        self.hook('post', payload)
+        self.install_hook('pre-commit', 'echo formatted > café.txt && git add café.txt\n')
+        output = self.command('commit-mine', 'A', '-m', 'A')
+        self.assertIn('changed by the pre-commit hook', output)
+        self.assertEqual('formatted\n', self.git('show', 'HEAD:café.txt'))
+
+    def test_pre_commit_restaging_another_sessions_write_aborts(self):
+        # Another session's Edit lands in this file while the hook runs; the hook's
+        # `git add -u` must not carry it into this commit.
+        self.edit('line10\n', 'line10 A\n')
+        self.install_hook('pre-commit',
+                          'mkdir -p .git/agent-ledger/B\n'
+                          'printf "shared\\t-\\t-\\tverified\\t100644\\n" > .git/agent-ledger/B/state\n'
+                          'sed -i.bak "s/^line13$/line13 B/" shared && rm shared.bak && git add -u\n')
+        before = self.git('rev-parse', 'HEAD')
+        with self.assertRaises(subprocess.CalledProcessError) as failure:
+            self.command('commit-mine', 'A', '-m', 'A')
+        self.assertIn('another session wrote it', failure.exception.output)
+        self.assertEqual(before, self.git('rev-parse', 'HEAD'))
+
+    def test_stale_ledger_of_a_finished_session_does_not_block_restaging(self):
+        self.edit('line10\n', 'line10 A\n')
+        stale = self.root / '.git' / 'agent-ledger' / 'OLD'
+        stale.mkdir(parents=True)
+        (stale / 'state').write_text('shared\t-\t-\tverified\t100644\n')
+        self.install_hook('pre-commit', 'sed -i.bak "s/line10 A/line10 FORMATTED/" shared && rm shared.bak && git add shared\n')
+        self.command('commit-mine', 'A', '-m', 'A')
+        self.assertIn('line10 FORMATTED', self.git('show', 'HEAD:shared'))
+
+    def test_emptied_message_commits_nothing(self):
+        self.edit('line10\n', 'line10 A\n')
+        self.install_hook('prepare-commit-msg', ': > "$1"\n')
+        before = self.git('rev-parse', 'HEAD')
+        with self.assertRaises(subprocess.CalledProcessError) as failure:
+            self.command('commit-mine', 'A', '-m', 'A')
+        self.assertIn('message is empty', failure.exception.output)
+        self.assertEqual(before, self.git('rev-parse', 'HEAD'))
+
+    def test_commit_msg_hook_edits_or_blocks_the_message(self):
+        self.edit('line10\n', 'line10 A\n')
+        self.install_hook('commit-msg', 'grep -q BLOCK "$1" && exit 1\necho "Signed-off-by: hook" >> "$1"\n')
+        before = self.git('rev-parse', 'HEAD')
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.command('commit-mine', 'A', '-m', 'BLOCK me')
+        self.assertEqual(before, self.git('rev-parse', 'HEAD'))
+        self.command('commit-mine', 'A', '-m', 'Subject')
+        self.assertEqual('Subject\nSigned-off-by: hook\n', self.git('log', '-1', '--format=%B').rstrip('\n') + '\n')
+
+    def test_pre_commit_restaging_lands_and_syncs(self):
+        self.edit('line10\n', 'line10 A\n')
+        (self.root / 'fmt.sed').write_text('s/line10 A/line10 FORMATTED/\n')
+        self.git('add', 'fmt.sed')
+        self.git('commit', '-qm', 'formatter')
+        self.install_hook('pre-commit', 'sed -i.bak -f fmt.sed shared && rm shared.bak && git add shared\n')
+        output = self.command('commit-mine', 'A', '-m', 'A')
+        self.assertIn('line10 FORMATTED', self.git('show', 'HEAD:shared'))
+        self.assertIn('changed by the pre-commit hook', output)
+        self.assertEqual('', self.git('status', '--porcelain'))
+
+    def test_post_commit_runs_and_hooks_path_is_honored(self):
+        self.edit('line10\n', 'line10 A\n')
+        ran = self.root / '.git' / 'post-ran'
+        self.git('config', 'core.hooksPath', 'myhooks')
+        self.install_hook('post-commit', f'git rev-parse HEAD > "{ran}"\n', 'myhooks')
+        (self.root / 'myhooks' / 'post-commit').chmod(0o755)
+        self.command('commit-mine', 'A', '-m', 'A')
+        self.assertEqual(self.git('rev-parse', 'HEAD'), ran.read_text())
+
     def test_signal_during_sync_keeps_shared_index_whole(self):
         for i in range(3):
             (self.root / f'f{i}').write_text('x\n')

@@ -5,6 +5,7 @@
 #   commit-mine -m "Add the thing"       commit recorded edits
 #   commit-mine -m "..." path/a path/b   only those recorded paths
 #   commit-mine --dry-run                show what would land
+#   commit-mine --no-verify -m "..."     skip pre-commit and commit-msg, as git does
 # Shell edits and unsupported operations require separate review.
 set -u
 # -P resolves through the installed skill link back to the repository root.
@@ -14,13 +15,14 @@ DIR="$(cd -P "$(dirname "$0")/../../.." && pwd)"
 
 ORIGINAL_ARGS=("$@")
 
-MSG=""; DRY=0; ONLY=()
+MSG=""; DRY=0; VERIFY=1; ONLY=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -m|--message)  MSG="$2"; shift 2 ;;
     -F|--file)     MSG="$(cat "$2")"; shift 2 ;;
     -n|--dry-run)  DRY=1; shift ;;
-    -h|--help)     sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --no-verify)   VERIFY=0; shift ;;
+    -h|--help)     sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*)            echo "commit-mine: unknown flag $1" >&2; exit 2 ;;
     *)             ONLY+=("$1"); shift ;;
   esac
@@ -42,10 +44,12 @@ paths="$(ledger_paths)"
 
 gd="$(git rev-parse --absolute-git-dir)"
 idx="$gd/commit-mine-index.$$"
+msgfile="$gd/commit-mine-msg.$$"
+trap 'rm -f "$idx" "$msgfile" "$msgfile.clean"' EXIT
 export GIT_INDEX_FILE="$idx"
 git read-tree "$base"
 
-landing=(); landed_entry=(); skipped=(); index_kept=()
+landing=(); skipped=(); index_kept=()
 while IFS= read -r p; do
   [ -n "$p" ] || continue
   entry="$(ledger_get "$p")"
@@ -63,7 +67,7 @@ while IFS= read -r p; do
     { [ -e "$p" ] || [ -L "$p" ]; } && { skipped+=("$p — deleted here but present in the tree"); continue; }
     head_mode="$(git ls-tree "$base" -- "$p" | awk '{print $1}')"
     { [ "$(_ledger_head_blob "$p")" = "$origin" ] && [ "$head_mode" = "$origin_mode" ]; } || { skipped+=("$p — changed in HEAD since deletion was recorded"); continue; }
-    git update-index --force-remove -- "$p" && { landing+=("$p"); landed_entry+=("-"); }; continue
+    git update-index --force-remove -- "$p" && landing+=("$p"); continue
   fi
   head_blob="$(git rev-parse -q --verify "$base:$p" 2>/dev/null)" || head_blob="-"
   if [ "$head_blob" = "$origin" ]; then
@@ -74,15 +78,17 @@ while IFS= read -r p; do
   [ "$merged" = "$head_blob" ] && { skipped+=("$p — already in HEAD"); continue; }
   mode="$(git ls-tree "$base" -- "$p" 2>/dev/null | awk '{print $1}')"
   [ -n "$mode" ] || mode="${origin_mode:-100644}"
-  git update-index --add --cacheinfo "$mode,$merged,$p" && { landing+=("$p"); landed_entry+=("$mode $merged"); }
+  git update-index --add --cacheinfo "$mode,$merged,$p" && landing+=("$p")
 done <<< "$paths"
 
 tree="$(git write-tree)"
-unset GIT_INDEX_FILE; rm -f "$idx"
+hook_changed=""
 
 report() {
   [ ${#landing[@]} -gt 0 ] && { echo "landing:"; printf '  %s\n' "${landing[@]}"; }
   [ ${#skipped[@]} -gt 0 ] && { echo "skipped:"; printf '  %s\n' "${skipped[@]}"; }
+  [ -n "$hook_changed" ] && { echo "changed by the pre-commit hook (review the commit):"; printf '%s\n' "$hook_changed" | sed 's/^/  /'; }
+  [ "${pre_commit_skipped:-0}" = 1 ] && echo "pre-commit hook not run: the tree holds other uncommitted changes, so run its checks yourself."
   [ ${#index_kept[@]} -gt 0 ] && { echo "shared index not updated (review before a plain git commit):"; printf '  %s\n' "${index_kept[@]}"; }
   return 0
 }
@@ -99,12 +105,13 @@ report() {
 # belong to another process. A signal discards the copy and exits.
 sync_lock="" sync_copy=""
 sync_cleanup() { rm -f "$sync_copy"; [ -n "$sync_lock" ] && rm -f "$sync_lock"; sync_lock=""; }
-sync_index() { # landing[], landed_entry[] -> index_kept[]
+sync_index() { # sync_paths[], sync_entries[] -> index_kept[]
   local shared="$gd/index" tries=0 i p want old current tag
+  [ ${#sync_paths[@]} -gt 0 ] || return 0
   until ( set -C; : > "$gd/index.lock" ) 2>/dev/null; do
     tries=$((tries + 1))
     if [ "$tries" -ge 20 ]; then
-      for p in "${landing[@]}"; do index_kept+=("$p — index busy"); done
+      for p in "${sync_paths[@]}"; do index_kept+=("$p — index busy"); done
       return 0
     fi
     sleep 0.1
@@ -115,13 +122,13 @@ sync_index() { # landing[], landed_entry[] -> index_kept[]
   trap 'sync_cleanup; exit 143' TERM
   if ! cp -p "$shared" "$sync_copy" 2>/dev/null; then
     trap - EXIT INT TERM; sync_cleanup
-    for p in "${landing[@]}"; do index_kept+=("$p — index unreadable"); done
+    for p in "${sync_paths[@]}"; do index_kept+=("$p — index unreadable"); done
     return 0
   fi
   export GIT_INDEX_FILE="$sync_copy"
   i=0
-  while [ "$i" -lt ${#landing[@]} ]; do
-    p="${landing[$i]}"; want="${landed_entry[$i]}"; i=$((i + 1))
+  while [ "$i" -lt ${#sync_paths[@]} ]; do
+    p="${sync_paths[$i]}"; want="${sync_entries[$i]}"; i=$((i + 1))
     [ "$want" = "-" ] && want=""
     old="$(git --literal-pathspecs ls-tree "$base" -- "$p" | awk '{print $1, $3}')"
     current="$(git --literal-pathspecs ls-files -s -- "$p" | awk '{print $1, $2, $3}')"
@@ -135,9 +142,10 @@ sync_index() { # landing[], landed_entry[] -> index_kept[]
       git update-index --add --cacheinfo "${want% *},${want#* },$p"
     fi 2>/dev/null || index_kept+=("$p — index update failed")
   done
-  git update-index -q --refresh >/dev/null 2>&1   # stat data for the entries written above
+  # No refresh: entries written without stat data are rehashed by the next
+  # `git status`, and a refresh here would hold the lock across the whole tree.
   unset GIT_INDEX_FILE
-  mv "$sync_copy" "$shared" || for p in "${landing[@]}"; do index_kept+=("$p — index not replaced"); done
+  mv "$sync_copy" "$shared" || for p in "${sync_paths[@]}"; do index_kept+=("$p — index not replaced"); done
   trap - EXIT INT TERM
   sync_cleanup
 }
@@ -146,14 +154,93 @@ sync_index() { # landing[], landed_entry[] -> index_kept[]
 [ "$DRY" = 1 ] && { echo "(dry run)"; report; git diff --stat "$base" "$tree"; exit 0; }
 [ -n "$MSG" ] || { echo "commit-mine: a message is required (-m)" >&2; exit 2; }
 
-sha="$(printf '%s\n' "$MSG" | git commit-tree "$tree" -p "$base")"
-if ! git update-ref -m "commit: $(printf '%s' "$MSG" | head -1)" HEAD "$sha" "$base" 2>/dev/null; then
+# The repository's commit hooks run as they would for `git commit --only`:
+# pre-commit sees the private index, so `git diff --cached` shows exactly this
+# commit, and anything it restages lands too. A missing or non-executable hook
+# passes, as in git.
+hooks_dir="$(git rev-parse --git-path hooks)"
+run_hook() { # <name> [args...]
+  local hook="$hooks_dir/$1"; shift
+  [ -x "$hook" ] || return 0
+  GIT_EDITOR=: "$hook" "$@" < /dev/null >&2
+}
+hook_failed() { echo "commit-mine: the $1 hook failed; nothing was committed." >&2; exit 1; }
+is_landing() { local l; for l in "${landing[@]}"; do [ "$l" = "$1" ] && return 0; done; return 1; }
+# Other sessions' ledgers, with checksums. Finished sessions leave stale entries
+# behind, so only a ledger that changed while the hook ran counts as a write.
+other_ledgers() {
+  local mine s; mine="$(ledger_dir)"
+  for s in "$gd"/agent-ledger/*/state; do
+    { [ -f "$s" ] && [ "${s%/state}" != "$mine" ]; } || continue
+    printf '%s\t%s\n' "$(cksum < "$s")" "$s"
+  done
+}
+claimed_elsewhere() { # <path>: a ledger that changed during the hook records it
+  local s
+  while IFS=$'\t' read -r _ s; do
+    P="$1" awk -F'\t' '$1 == ENVIRON["P"] { found = 1 } END { exit !found }' "$s" && return 0
+  done < <(other_ledgers | grep -vxF -f <(printf '%s\n' "$ledgers_before") || true)
+  return 1
+}
+
+# In a shared tree, pre-commit acts on files other sessions are still editing: a
+# restaging hook (`git add -u`, formatters) would commit their hunks, and a
+# stash-and-restore hook would rewrite them on disk. So it runs only while the
+# tree holds nothing beyond this commit, and may restage only this commit's paths.
+pre_commit_skipped=0
+if [ "$VERIFY" = 1 ] && [ -x "$hooks_dir/pre-commit" ]; then
+  if git diff --quiet 2>/dev/null; then
+    ledgers_before="$(other_ledgers)"
+    run_hook pre-commit || hook_failed pre-commit
+    hooked="$(git write-tree)"
+    if [ "$hooked" != "$tree" ]; then
+      # A restaged path must be one of this commit's, and no other session may have
+      # recorded a write to it while the hook ran.
+      foreign=""
+      while IFS= read -r -d '' p; do
+        hook_changed+="$p"$'\n'
+        if ! is_landing "$p"; then foreign+="  $p — outside this commit"$'\n'
+        elif claimed_elsewhere "$p"; then foreign+="  $p — another session wrote it"$'\n'
+        fi
+      done < <(git diff-tree -r -z --name-only "$tree" "$hooked")
+      hook_changed="${hook_changed%$'\n'}"
+      if [ -n "$foreign" ]; then
+        echo "commit-mine: the pre-commit hook staged work that is not this session's; nothing was committed:" >&2
+        printf '%s' "$foreign" >&2
+        exit 1
+      fi
+      tree="$hooked"
+    fi
+    [ "$tree" = "$(git rev-parse "$base^{tree}")" ] && { echo "commit-mine: nothing to commit after the pre-commit hook"; exit 0; }
+  else
+    pre_commit_skipped=1
+  fi
+fi
+printf '%s\n' "$MSG" > "$msgfile"
+run_hook prepare-commit-msg "$msgfile" message || hook_failed prepare-commit-msg
+if [ "$VERIFY" = 1 ]; then run_hook commit-msg "$msgfile" || hook_failed commit-msg; fi
+# As `git commit -m` does: tidy whitespace and refuse an empty message.
+git stripspace < "$msgfile" > "$msgfile.clean" && mv "$msgfile.clean" "$msgfile"
+[ -s "$msgfile" ] || { echo "commit-mine: the commit message is empty; nothing was committed." >&2; exit 1; }
+subject="$(head -1 "$msgfile")"
+
+sha="$(git commit-tree "$tree" -p "$base" < "$msgfile")"
+if ! git update-ref -m "commit: $subject" HEAD "$sha" "$base" 2>/dev/null; then
   echo "commit-mine: HEAD moved while this commit was being built (another session landed one)." >&2
   echo "             Nothing was committed. Re-run — the ledger is unchanged." >&2
   exit 1
 fi
+unset GIT_INDEX_FILE; rm -f "$idx" "$msgfile"; trap - EXIT
 
 ledger_drop "${landing[@]}"
+# Every path the commit changed, with its committed entry or "-" for a removal:
+# the landed paths plus anything the pre-commit hook restaged.
+sync_paths=(); sync_entries=()
+while IFS= read -r -d '' p; do
+  entry="$(git --literal-pathspecs ls-tree "$sha" -- "$p" | awk '{print $1, $3}')"
+  sync_paths+=("$p"); sync_entries+=("${entry:--}")
+done < <(git diff-tree -r -z --name-only --no-renames "$base" "$sha")
 sync_index
-echo "committed $(git rev-parse --short HEAD)  $(printf '%s' "$MSG" | head -1)"
+run_hook post-commit || true
+echo "committed $(git rev-parse --short HEAD)  $subject"
 report

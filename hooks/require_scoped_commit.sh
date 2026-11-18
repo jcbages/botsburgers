@@ -19,9 +19,15 @@ REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 CMD="$(jq -r '.tool_input.command // empty' | strip_heredoc_bodies)"
 
+# A commit message is text, not a command: `commit-mine -m "a plain git commit
+# would undo it"` runs no git commit. Drop quoted -m/--message bodies (short
+# clusters such as -am included) before looking for one.
+UNMESSAGED="$(printf '%s' "$CMD" | tr '\n' ' ' \
+  | sed -E 's/(^|[[:space:]])(-[a-zA-Z]*m|--message)([[:space:]]+|=)"[^"]*"/\1/g; s/(^|[[:space:]])(-[a-zA-Z]*m|--message)([[:space:]]+|=)'"'"'[^'"'"']*'"'"'/\1/g')"
+
 # Only the porcelain sweeps an index it did not build. `commit-tree` commits a tree
 # assembled elsewhere — that is the flow this gate steers toward, so it stays silent.
-printf '%s' "$CMD" \
+printf '%s' "$UNMESSAGED" \
   | grep -qE '(^|[;&|[:space:]])([A-Za-z0-9_./-]*/)?git[[:space:]]+([^;&|]*[[:space:]])?commit([[:space:]]|$)' \
   || exit 0
 
