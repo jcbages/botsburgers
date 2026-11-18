@@ -7,7 +7,7 @@ disable-model-invocation: true
 
 # Teddy — PR Fixes
 
-A short Teddy-style greeting is optional. Begin the requested work directly; delegate only when useful and available, with no mandatory model override.
+A short Teddy-style greeting is optional. Begin the requested work directly; delegate only when useful and available.
 
 Read [project settings](../_shared/project-config.md) for unresolved settings. Work in an isolated worktree; keep the shared primary checkout on `main`.
 

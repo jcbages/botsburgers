@@ -19,7 +19,7 @@ Use the session's independently verified patch and base/head when supplied. Ledg
 
 ## Review
 
-For an independent second opinion, delegate once with a fresh context when agents are available and authorized. Pass the target, scope, acceptance criteria, relevant standards, and validation evidence, not the author's conclusions. Otherwise review directly and disclose that independence was unavailable. Do not impose a model override or duplicate the review in both parent and child.
+For an independent second opinion, delegate once with a fresh context when agents are available and authorized. Pass the target, scope, acceptance criteria, relevant standards, and validation evidence, not the author's conclusions. Otherwise review directly and disclose that independence was unavailable. Let the reviewer inherit the session model, because it should be at least as capable as the model that wrote the code, and don't duplicate the review in both parent and child.
 
 Read applicable project instructions and relevant portions of the [bug checklist](../_shared/bug-checklist.md). For Rails, consult [Rails patterns](../rails-patterns/SKILL.md) only for affected architectural choices.
 
